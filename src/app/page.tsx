@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import '../app/globals.css';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import AutoComplete from '@/components/youtubeinput';
 import {
   Card,
   CardHeader,
@@ -218,11 +219,12 @@ export default function Home() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
+              <AutoComplete />
               <div className="relative">
                 <Link className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   type="text"
-                  placeholder="YouTubeのURLを入力"
+                  placeholder="youtubeで検索,またはURLを入力"
                   value={urlQuery}
                   onChange={(e) => setUrlQuery(e.target.value)}
                   className="pl-8"
