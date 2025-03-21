@@ -9,8 +9,6 @@ import { NextApiRequest, NextApiResponse } from "next";
 export function transformYouTubeResponse(youtubeResponse) {
   // 必要なメタデータを抽出
   const {
-    nextPageToken,
-    pageInfo,
     items
   } = youtubeResponse;
 
