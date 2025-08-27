@@ -130,6 +130,8 @@ const PlayerLyrics: React.FC<PlayerLyricsProps> = ({
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState<boolean>(true);
   const scrollDisableTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isProgrammaticScrollingRef = useRef<boolean>(false);
+  const lastUserScrollTimeRef = useRef<number>(0);
+  const scrollCooldownPeriod = 200;
 
   useEffect(() => {
     if (currentLineIndex < 0 || currentLineIndex >= lyricsData.length) return;
@@ -156,21 +158,30 @@ const PlayerLyrics: React.FC<PlayerLyricsProps> = ({
     const container = lyricsContainerRef.current;
     if (!container) return;
 
-    const handleScroll = () => {
+    const handleUserScroll = () => {
       if (isProgrammaticScrollingRef.current) return;
-      if (scrollDisableTimerRef.current) {
-        clearTimeout(scrollDisableTimerRef.current);
-      }
-      setIsAutoScrollEnabled(false);
+      
+      const now = Date.now();
+      if (now - lastUserScrollTimeRef.current > scrollCooldownPeriod) {
+        lastUserScrollTimeRef.current = now;
+        
+        if (scrollDisableTimerRef.current) {
+          clearTimeout(scrollDisableTimerRef.current);
+        }
+        setIsAutoScrollEnabled(false);
 
-      scrollDisableTimerRef.current = setTimeout(() => {
-        setIsAutoScrollEnabled(true);
-      }, 5000);
+        scrollDisableTimerRef.current = setTimeout(() => {
+          setIsAutoScrollEnabled(true);
+        }, 2000);
+      }
     };
 
-    container.addEventListener('scroll', handleScroll);
+    container.addEventListener('wheel', handleUserScroll, { passive: true });
+    container.addEventListener('touchmove', handleUserScroll, { passive: true });
+
     return () => {
-      container.removeEventListener('scroll', handleScroll);
+      container.removeEventListener('wheel', handleUserScroll);
+      container.removeEventListener('touchmove', handleUserScroll);
     };
   }, []);
 
@@ -200,15 +211,17 @@ const PlayerLyrics: React.FC<PlayerLyricsProps> = ({
       const lyricOffsetTop = activeLyric.offsetTop;
       const lyricHeight = activeLyric.clientHeight;
   
+      const offsetPercentage = settings.scrollPositionOffset !== undefined ? settings.scrollPositionOffset / 100 : 0.5;
+      
       // モバイルは画面上部、PCなどは中央寄せ
       let targetScrollTop: number;
       if (isMobile) {
         const displayHeight = window.innerHeight;
-        const offsetFromTop = displayHeight * 0.3;
+        const offsetFromTop = displayHeight * offsetPercentage;
         targetScrollTop = lyricOffsetTop - offsetFromTop + lyricHeight / 2;
       } else {
-        targetScrollTop =
-          lyricOffsetTop - containerHeight / 2 + lyricHeight / 2;
+        const scrollOffset = (1 - offsetPercentage) * containerHeight;
+        targetScrollTop = lyricOffsetTop - containerHeight / 2 + lyricHeight / 2 + scrollOffset - containerHeight / 2;
       }
   
       // スクロール範囲を超えないように調整
@@ -218,12 +231,15 @@ const PlayerLyrics: React.FC<PlayerLyricsProps> = ({
       );
 
       isProgrammaticScrollingRef.current = true;
+      
       (smoothScrollTo as (element: HTMLElement, to: number, duration: number) => Promise<void>)(container, targetScrollTop, scrollDuration)
-        .then(() => {
-          isProgrammaticScrollingRef.current = false;
+        .finally(() => {
+          setTimeout(() => {
+            isProgrammaticScrollingRef.current = false;
+          }, 50);
         });
     }
-  }, [currentLineIndex, lyricsData, duration, isMobile, smoothScrollTo, isAutoScrollEnabled]);
+  }, [currentLineIndex, lyricsData, duration, isMobile, smoothScrollTo, isAutoScrollEnabled, settings.scrollPositionOffset]);
 
   const handleLyricsMouseEnter = () => {
     setIsLyricsHovered(true);
@@ -336,7 +352,7 @@ const PlayerLyrics: React.FC<PlayerLyricsProps> = ({
               >
                 {isInterlude
                   ? isActive
-                    ? renderInterludeDots(line.time, endTime)
+                    ? renderInterludeDots(line.time, endTime, settings.lyricposition === 'right' ? 'right' : settings.lyricposition === 'center' ? 'center' : 'left')
                     : null
                   : isActive && settings.useKaraokeLyric
                   ? (

@@ -6,6 +6,8 @@ import { ArrowLeft, MoreHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useTheme } from 'next-themes';
 import PlayerLyrics from '@/components/player-lyrics';
+import TTMLLyrics from '@/components/ttml-lyrics';
+import AMLLLyrics from '@/components/amll-lyrics';
 import PlayerControls from '@/components/player-controls';
 import SettingsSidebar from '@/components/settings-dialog';
 import { toast } from 'sonner';
@@ -16,8 +18,8 @@ const DEFAULT_SETTINGS: Settings = {
   fullplayer: false,
   fontSize: 'medium',
   lyricposition: 'left',
-  backgroundblur: 'medium',
-  backgroundtransparency: 'medium',
+  backgroundblur: 10,
+  backgroundtransparency: 50,
   theme: 'dark',
   playerposition: 'right',
   volume: 50,
@@ -25,6 +27,19 @@ const DEFAULT_SETTINGS: Settings = {
   useKaraokeLyric: true,
   lyricProgressDirection: 'ltr',
   CustomEasing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  scrollPositionOffset: 50,
+  useTTML: false,
+  useWordTiming: true,
+  useAMLL: true,
+  amllEnableSpring: true,
+  amllEnableBlur: true,
+  amllEnableScale: true,
+  amllHidePassedLines: false,
+  amllSpringParams: {
+    mass: 1,
+    tension: 280,
+    friction: 60,
+  },
 };
 
 const Player: React.FC<PlayerProps> = ({
@@ -34,6 +49,7 @@ const Player: React.FC<PlayerProps> = ({
   albumName,
   artistName,
   onBack,
+  ttmlData,
 }) => {
   const youtubeRef = useRef<YouTube['internalPlayer'] | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -42,6 +58,9 @@ const Player: React.FC<PlayerProps> = ({
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [volume, setVolume] = useState<number>(50);
   const [isMobile, setIsMobile] = useState<boolean>(false);
+  const [mobileControlsVisible, setMobileControlsVisible] = useState<boolean>(true);
+  const [lastInteractionTime, setLastInteractionTime] = useState<number>(Date.now());
+  const hideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const { setTheme, resolvedTheme } = useTheme();
   const theme = resolvedTheme || 'system';
   const [showSettings, setShowSettings] = useState<boolean>(false);
@@ -49,7 +68,11 @@ const Player: React.FC<PlayerProps> = ({
   const didShowToastRef = useRef(false);
   const [settings, setSettings] = useState<Settings>(() => {
     const savedSettings = localStorage.getItem('playerSettings');
-    return savedSettings ? JSON.parse(savedSettings) : DEFAULT_SETTINGS;
+    if (savedSettings) {
+      const parsed = JSON.parse(savedSettings);
+      return { ...DEFAULT_SETTINGS, ...parsed };
+    }
+    return DEFAULT_SETTINGS;
   });
 
   const processedLyricsData = useMemo(() => {
@@ -61,7 +84,7 @@ const Player: React.FC<PlayerProps> = ({
 
   const updateSettings = (newSettings: Partial<Settings>) => {
     setSettings((prevSettings) => {
-      const updatedSettings = { ...prevSettings, ...newSettings };
+      const updatedSettings = { ...DEFAULT_SETTINGS, ...prevSettings, ...newSettings };
       localStorage.setItem('playerSettings', JSON.stringify(updatedSettings));
       return updatedSettings;
     });
@@ -97,6 +120,54 @@ const Player: React.FC<PlayerProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, [wasFullPlayerManuallySet]);
 
+  // モバイル版でのコントロール表示管理
+  useEffect(() => {
+    if (!isMobile) return;
+
+    // 再生停止時は常に表示
+    if (!isPlaying) {
+      setMobileControlsVisible(true);
+      if (hideTimeoutRef.current) {
+        clearTimeout(hideTimeoutRef.current);
+        hideTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    // 再生中は5秒後に非表示
+    if (hideTimeoutRef.current) {
+      clearTimeout(hideTimeoutRef.current);
+    }
+    
+    hideTimeoutRef.current = setTimeout(() => {
+      setMobileControlsVisible(false);
+    }, 5000);
+
+    return () => {
+      if (hideTimeoutRef.current) {
+        clearTimeout(hideTimeoutRef.current);
+      }
+    };
+  }, [isMobile, isPlaying, lastInteractionTime]);
+
+  // モバイル版でのコントロール表示切り替え
+  const handleMobileControlsToggle = () => {
+    if (!isMobile) return;
+    
+    setMobileControlsVisible(true);
+    setLastInteractionTime(Date.now());
+    
+    // 再生中の場合は5秒後に再度非表示
+    if (isPlaying) {
+      if (hideTimeoutRef.current) {
+        clearTimeout(hideTimeoutRef.current);
+      }
+      hideTimeoutRef.current = setTimeout(() => {
+        setMobileControlsVisible(false);
+      }, 5000);
+    }
+  };
+
   // 設定変更
   const handleSettingChange = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     if (key === 'theme') {
@@ -107,6 +178,12 @@ const Player: React.FC<PlayerProps> = ({
     if (key === 'fullplayer') {
       setWasFullPlayerManuallySet(true);
     }
+    
+    if (key === 'useAMLL' && value === true) {
+      updateSettings({ [key]: value, useTTML: true });
+      return;
+    }
+    
     updateSettings({ [key]: value });
   };
 
@@ -228,6 +305,9 @@ const Player: React.FC<PlayerProps> = ({
 
   // スクロール
   const parseCubicBezier = (easing: string): [number, number, number, number] => {
+    if (!easing || typeof easing !== 'string') {
+      return [0.22, 1, 0.36, 1];
+    }
     const cleaned = easing.replace('cubic-bezier(', '').replace(')', '');
     const parts = cleaned.split(',').map(s => parseFloat(s.trim()));
     if (parts.length !== 4 || parts.some(isNaN)) {
@@ -241,24 +321,38 @@ const Player: React.FC<PlayerProps> = ({
       return new Promise((resolve) => {
         const start = element.scrollTop;
         const change = to - start;
+        
+        if (Math.abs(change) < 5) {
+          resolve();
+          return;
+        }
+        
         const startTime = performance.now();
         let p1x = 0.22, p1y = 1, p2x = 0.36, p2y = 1;
         try {
-          const easingValues = parseCubicBezier(settings.CustomEasing);
+          const easingValues = parseCubicBezier(settings.CustomEasing || 'cubic-bezier(0.22, 1, 0.36, 1)');
           [p1x, p1y, p2x, p2y] = easingValues;
         } catch (e) {
           console.error("Invalid CustomEasing, falling back to default.", e);
         }
         const bezier = cubicBezier(p1x, p1y, p2x, p2y);
 
+        let lastScrollTop = start;
         const animateScroll = (currentT: number) => {
           const elapsed = currentT - startTime;
           const progress = Math.min(elapsed / duration, 1);
           const ease = bezier(progress);
-          element.scrollTop = start + change * ease;
+          const newScrollTop = start + change * ease;
+          
+          if (Math.abs(newScrollTop - lastScrollTop) >= 1) {
+            element.scrollTop = newScrollTop;
+            lastScrollTop = newScrollTop;
+          }
+          
           if (elapsed < duration) {
             requestAnimationFrame(animateScroll);
           } else {
+            element.scrollTop = to;
             resolve();
           }
         };
@@ -314,7 +408,7 @@ const Player: React.FC<PlayerProps> = ({
     return resolvedTheme === 'dark' ? 'rgba(255,255,255,' : 'rgba(0,0,0,';
   };
 
-  const renderInterludeDots = (startTime: number, endTime: number) => {
+  const renderInterludeDots = (startTime: number, endTime: number, alignment: 'left' | 'center' | 'right' = 'center') => {
     const total = endTime - startTime;
     if (total < 1) return null;
     if (total <= 0) return null;
@@ -322,19 +416,46 @@ const Player: React.FC<PlayerProps> = ({
     if (dt < 0 || dt >= total) return null;
 
     const appearEnd = 2;
-    const exitStart = total - 1.2;
+    const exitStart = settings.useTTML && ttmlData ? total - 1.0 : total - 1.1;
     let parentScale = 1.0;
     let opacity = 1.0;
-    let transformTransition = '4s cubic-bezier(0.19, 1, 0.22, 1)';
+    const transitionDuration = Math.min(Math.max(total * 0.4, 2), 6);
+    let transformTransition = `${transitionDuration}s cubic-bezier(0.19, 1, 0.22, 1)`;
     let opacityTransition = '0.5s cubic-bezier(0.19, 1, 0.22, 1)';
     let dotFills: [number, number, number] = [0, 0, 0];
+    const availableDuration = exitStart - appearEnd - 2;
+    const pulseCycleDuration = 5;
+    const pulseCount = Math.max(1, Math.floor(availableDuration / pulseCycleDuration));
+    const actualPulseDuration = availableDuration / pulseCount;
 
     if (dt < exitStart - 1) {
       const appearRatio = dt < appearEnd ? dt / appearEnd : 1;
       opacity = appearRatio;
 
-      const modT = dt % 4;
-      parentScale = modT < 2 ? 1.1 : 0.9;
+      if (dt < appearEnd) {
+        opacityTransition = '4s cubic-bezier(0.19, 1, 0.22, 1)';
+        parentScale = 0.9 + (0.2 * dt / appearEnd);
+      } else if (dt < exitStart - 2) {
+        const pulseTime = dt - appearEnd;
+        
+        if (pulseTime < 1) {
+          parentScale = 1.1;
+        } else {
+          const adjustedPulseTime = pulseTime - 1;
+          const timeInCycle = adjustedPulseTime % actualPulseDuration;
+          
+          const cooldownTime = actualPulseDuration * 0.2;
+          
+          if (timeInCycle < cooldownTime) {
+            parentScale = 0.9;
+          } else {
+            const pulsePhase = (timeInCycle - cooldownTime) / (actualPulseDuration - cooldownTime);
+            parentScale = 0.9 + 0.2 * Math.sin(pulsePhase * Math.PI);
+          }
+        }
+      } else {
+        parentScale = 0.9;
+      }
 
       const midDuration = Math.max(0, total - 1);
       let ratio = dt / midDuration;
@@ -355,11 +476,11 @@ const Player: React.FC<PlayerProps> = ({
 
       if (dtExit < 0.8) {
         transformTransition = '2s cubic-bezier(0.19, 1, 0.22, 1)';
-        parentScale = 1.3;
+        parentScale = 1.1;
         opacity = 1;
       } else if (dtExit < 1.0) {
-        transformTransition = '1s cubic-bezier(0.19, 1, 0.22, 1)';
-        opacityTransition = '0.5s cubic-bezier(0.19, 1, 0.22, 1)';
+        transformTransition = settings.useTTML && ttmlData ? '0.5s cubic-bezier(0.19, 1, 0.22, 1)' : '0.4s cubic-bezier(0.19, 1, 0.22, 1)';
+        opacityTransition = settings.useTTML && ttmlData ? '0.2s cubic-bezier(0.19, 1, 0.22, 1)' : '0.4s cubic-bezier(0.19, 1, 0.22, 1)';
         parentScale = 0.6;
         opacity = 0;
       }
@@ -381,14 +502,14 @@ const Player: React.FC<PlayerProps> = ({
       position: 'absolute',
       marginTop:
         settings.fontSize === 'small'
-          ? '5px'
-          : settings.fontSize === 'medium'
           ? '10px'
-          : '15px',
+          : settings.fontSize === 'medium'
+          ? '20px'
+          : '25px',
       left:
-        settings.lyricposition === 'center'
+        alignment === 'center'
           ? '50%'
-          : settings.lyricposition === 'right'
+          : alignment === 'right'
           ? 'auto'
           : settings.fontSize === 'small'
           ? '5px'
@@ -396,7 +517,7 @@ const Player: React.FC<PlayerProps> = ({
           ? '10px'
           : '15px',
       right:
-        settings.lyricposition === 'right'
+        alignment === 'right'
           ? settings.fontSize === 'small'
             ? '5px'
             : settings.fontSize === 'medium'
@@ -404,7 +525,7 @@ const Player: React.FC<PlayerProps> = ({
             : '15px'
           : 'auto',
       transform:
-        settings.lyricposition === 'center'
+        alignment === 'center'
           ? `translateX(-50%) scale(${parentScale + fontSizeScale})`
           : `scale(${parentScale + fontSizeScale})`,
     };
@@ -430,7 +551,7 @@ const Player: React.FC<PlayerProps> = ({
     );
   };
 
-  // YouTubeのコントロールを非表示に
+  // YouTubeのコントロールを非表示
   const opts = {
     playerVars: {
       controls: 0,
@@ -439,18 +560,44 @@ const Player: React.FC<PlayerProps> = ({
 
   return (
     <>
-      <PlayerLyrics
-        lyricsData={processedLyricsData}
-        currentTime={currentTime}
-        duration={duration}
-        currentLineIndex={currentLineIndex}
-        isMobile={isMobile}
-        settings={settings}
-        resolvedTheme={theme}
-        onLyricClick={handleLyricClick}
-        renderInterludeDots={renderInterludeDots}
-        smoothScrollTo={smoothScrollTo}
-      />
+      {settings.useTTML && ttmlData && settings.useAMLL ? (
+        <AMLLLyrics
+          ttmlData={ttmlData}
+          currentTime={currentTime}
+          settings={settings}
+          onLyricClick={handleLyricClick}
+          isMobile={isMobile}
+          isPlaying={isPlaying}
+          resolvedTheme={theme}
+        />
+      ) : settings.useTTML && ttmlData ? (
+        <TTMLLyrics
+          lyricsData={processedLyricsData}
+          currentTime={currentTime}
+          duration={duration}
+          currentLineIndex={currentLineIndex}
+          isMobile={isMobile}
+          settings={settings}
+          resolvedTheme={theme}
+          onLyricClick={handleLyricClick}
+          renderInterludeDots={renderInterludeDots}
+          smoothScrollTo={smoothScrollTo}
+          ttmlData={ttmlData}
+        />
+      ) : (
+        <PlayerLyrics
+          lyricsData={processedLyricsData}
+          currentTime={currentTime}
+          duration={duration}
+          currentLineIndex={currentLineIndex}
+          isMobile={isMobile}
+          settings={settings}
+          resolvedTheme={theme}
+          onLyricClick={handleLyricClick}
+          renderInterludeDots={renderInterludeDots}
+          smoothScrollTo={smoothScrollTo}
+        />
+      )}
 
       <PlayerControls
         isPlaying={isPlaying}
@@ -468,39 +615,19 @@ const Player: React.FC<PlayerProps> = ({
         albumName={albumName}
         settings={settings}
         formatTime={formatTime}
+        mobileControlsVisible={mobileControlsVisible}
+        onMobileControlsToggle={handleMobileControlsToggle}
       />
 
       <div className="fixed z-0 w-full h-full">
         <div
-          className={`w-full h-full fixed top-0 left-0 ${
-            resolvedTheme === 'dark'
-              ? `${
-                  settings.backgroundtransparency === 'small'
-                    ? 'bg-opacity-40'
-                    : settings.backgroundtransparency === 'medium'
-                    ? 'bg-opacity-70'
-                    : settings.backgroundtransparency === 'large'
-                    ? 'bg-opacity-80'
-                    : 'bg-opacity-0'
-                } bg-black`
-              : `${
-                  settings.backgroundtransparency === 'small'
-                    ? 'bg-opacity-20'
-                    : settings.backgroundtransparency === 'medium'
-                    ? 'bg-opacity-30'
-                    : settings.backgroundtransparency === 'large'
-                    ? 'bg-opacity-50'
-                    : 'bg-opacity-0'
-                } bg-white`
-          } ${
-            settings.backgroundblur === 'small'
-              ? 'backdrop-blur-sm'
-              : settings.backgroundblur === 'medium'
-              ? 'backdrop-blur-md'
-              : settings.backgroundblur === 'large'
-              ? 'backdrop-blur-lg'
-              : ''
-          }`}
+          className="w-full h-full fixed top-0 left-0"
+          style={{
+            backgroundColor: resolvedTheme === 'dark' 
+              ? `rgba(0, 0, 0, ${settings.backgroundtransparency / 100})`
+              : `rgba(255, 255, 255, ${settings.backgroundtransparency / 100})`,
+            backdropFilter: settings.backgroundblur > 0 ? `blur(${settings.backgroundblur}px)` : 'none',
+          }}
         />
         <YouTube
           videoId={audioUrl}
@@ -526,18 +653,18 @@ const Player: React.FC<PlayerProps> = ({
         variant="ghost"
         size="icon"
         onClick={onBack}
-        className="fixed top-4 left-4 z-50 text-gray-900 dark:text-white"
+        className="fixed top-4 left-4 z-50 h-12 w-12 rounded-full hover:bg-background/50 hover:dark:bg-background/30 hover:backdrop-blur-sm text-foreground/90 hover:text-foreground transition-all duration-200 drop-shadow-sm"
       >
-        <ArrowLeft size={30} style={{ width: '25px', height: '25px' }} />
+        <ArrowLeft className="h-6 w-6" />
       </Button>
 
       <Button
         variant="ghost"
         size="icon"
         onClick={() => setShowSettings(true)}
-        className="fixed top-4 right-4 z-50 text-gray-900 dark:text-white"
+        className="fixed top-4 right-4 z-50 h-12 w-12 rounded-full hover:bg-background/50 hover:dark:bg-background/30 hover:backdrop-blur-sm text-foreground/90 hover:text-foreground transition-all duration-200 drop-shadow-sm"
       >
-        <MoreHorizontal size={30} style={{ width: '30px', height: '30px' }} />
+        <MoreHorizontal className="h-6 w-6" />
       </Button>
     </>
   );
